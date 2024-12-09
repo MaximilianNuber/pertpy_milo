@@ -1,0 +1,36 @@
+Metadata-Version: 2.1
+Name: pertpy_differential_expression
+Version: 0.1
+Summary: Perturbation Analysis in the scverse ecosystem.
+Author: Lukas Heumos, Yuge Ji, Lilly May, Alejandro Tejada, Johannes Köster, Emma Dann, Xinyue Zhang, Xichen Wu, Tessa Green, Stefan Peidli, Antonia Schumacher, Gregor Sturm
+Maintainer-email: Maximilian Nuber <maximilian.d.nuber@gmail.com>
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Framework :: Jupyter
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: Natural Language :: English
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Requires-Python: <3.13,>=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: rich
+Requires-Dist: scanpy[leiden]
+Requires-Dist: muon
+Requires-Dist: requests
+Requires-Dist: scikit-misc
+Requires-Dist: scipy
+Requires-Dist: adjusttext
+Requires-Dist: decoupler
+Requires-Dist: sparsecca
+Requires-Dist: openpyxl
+Requires-Dist: pyarrow
+Requires-Dist: blitzgsea
+Requires-Dist: lamin_utils

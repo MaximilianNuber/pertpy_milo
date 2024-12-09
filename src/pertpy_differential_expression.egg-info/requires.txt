@@ -1,0 +1,13 @@
+rich
+scanpy[leiden]
+muon
+requests
+scikit-misc
+scipy
+adjusttext
+decoupler
+sparsecca
+openpyxl
+pyarrow
+blitzgsea
+lamin_utils
