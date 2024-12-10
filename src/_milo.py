@@ -12,6 +12,7 @@ import seaborn as sns
 from anndata import AnnData
 from lamin_utils import logger
 from mudata import MuData
+from formulaic import model_matrix
 
 # ._doc import _doc_params, doc_common_plot_args
 
@@ -60,6 +61,7 @@ class Milo:
             >>> milo = pt.tl.Milo()
             >>> mdata = milo.load(adata)
         """
+        print("entirely new 5")
         mdata = MuData({feature_key: input, "milo": AnnData()})
 
         return mdata
@@ -308,7 +310,7 @@ class Milo:
             raise
         adata = mdata[feature_key]
 
-        covariates = [x.strip(" ") for x in set(re.split("\\+|\\*", design.lstrip("~ ")))]
+        covariates = [x.strip(" ") for x in set(re.split("\\+|\\*|\\:", design.lstrip("~ ")))]
 
         # Add covariates used for testing to sample_adata.var
         sample_col = sample_adata.uns["sample_col"]
@@ -342,6 +344,7 @@ class Milo:
             raise
         # Get count matrix
         count_mat = sample_adata.X.T.toarray()
+        print(count_mat.shape)
         lib_size = count_mat.sum(0)
 
         # Filter out samples with zero counts
@@ -365,13 +368,25 @@ class Milo:
             # Define model matrix
             if not add_intercept or model_contrasts is not None:
                 design = design + " + 0"
-            model = stats.model_matrix(object=stats.formula(design), data=design_df)
+            model = model_matrix(design, design_df)
+            print(model.columns)
+
+            model.columns = [''.join(list(re.split("\\[|\\.|\\]|T", x))) for x in model.columns]
+            model.columns = [x.replace(":", ".") for x in model.columns]
+            
 
             # Fit NB-GLM
-            dge = edgeR.DGEList(counts=count_mat[keep_nhoods, :][:, keep_smp], lib_size=lib_size[keep_smp])
+            dge = edgeR.DGEList(
+                counts=_py_to_r(count_mat[keep_nhoods, :][:, keep_smp]), 
+                lib_size=_py_to_r(lib_size[keep_smp])
+            )
             dge = edgeR.calcNormFactors(dge, method="TMM")
-            dge = edgeR.estimateDisp(dge, model)
-            fit = edgeR.glmQLFit(dge, model, robust=True)
+
+            r_model = _py_to_r(model)
+            
+            dge = edgeR.estimateDisp(dge, r_model)
+            
+            fit = edgeR.glmQLFit(dge, base.as_matrix(r_model), robust=_py_to_r(True))
 
             # Test
             n_coef = model.shape[1]
@@ -385,11 +400,17 @@ class Milo:
                 from rpy2.robjects.packages import STAP
 
                 get_model_cols = STAP(r_str, "get_model_cols")
-                model_mat_cols = get_model_cols.get_model_cols(design_df, design)
+                model_mat_cols = list(model.columns)
+                print(model_mat_cols)
+                
                 model_df = pd.DataFrame(model)
+                
                 model_df.columns = model_mat_cols
+
+                r_model_df = _py_to_r(model_df)
                 try:
-                    mod_contrast = limma.makeContrasts(contrasts=model_contrasts, levels=model_df)
+                    
+                    mod_contrast = limma.makeContrasts(contrasts=_py_to_r(model_contrasts), levels=r_model_df)
                 except ValueError:
                     logger.error("Model contrasts must be in the form 'A-B' or 'A+B'")
                     raise
@@ -401,14 +422,16 @@ class Milo:
 
             from rpy2.robjects import conversion
 
-            res = conversion.rpy2py(res)
-            if not isinstance(res, pd.DataFrame):
-                res = pd.DataFrame(res)
+            res = _r_to_py(res)
+            # if not isinstance(res, pd.DataFrame):
+            #     res = pd.DataFrame(res)
 
         # Save outputs
+        print(res.head(20))
         res.index = sample_adata.var_names[keep_nhoods]  # type: ignore
+        
         if any(col in sample_adata.var.columns for col in res.columns):
-            sample_adata.var = sample_adata.var.drop(res.columns, axis=1)
+            sample_adata.var = sample_adata.var.drop([x for x in res.columns if x in sample_adata.var.columns], axis=1)
         sample_adata.var = pd.concat([sample_adata.var, res], axis=1)
 
         # Run Graph spatial FDR correction
@@ -649,6 +672,80 @@ class Milo:
         nhoods_X = csr_matrix(nhoods_X / adata.obsm["nhoods"].toarray().sum(0))
         sample_adata.varm[expr_id] = nhoods_X.T
 
+    def find_nhood_groups(
+        self,
+        mdata, 
+        SpatialFDR_threshold = 0.1,
+        merge_discord = False,
+        max_lfc_delta=None,
+        overlap=1,
+        subset_nhoods: None | str = None,
+    ):
+        """Get igraph graph from adjacency matrix. Adjusted from scanpy louvain clustering."""
+        nhs = mdata["rna"].obsm["nhoods"].copy()
+        nhood_adj = mdata["milo"].varp["nhood_connectivities"].copy()
+        da_res = mdata["milo"].var.copy()
+        is_da = np.asarray(da_res.SpatialFDR <= SpatialFDR_threshold)
+
+        if subset_nhoods is not None:
+            print(da_res.shape)
+            mask_da_res = (
+                da_res
+                .query(subset_nhoods)
+                .copy()
+            )
+            mask = np.asarray([True if x in mask_da_res.index else False for x in da_res.index])
+            da_res = da_res.loc[mask, :].copy()
+            print(da_res.shape)
+            # mask = da_res.index.values.astype(bool)
+            print(mask.shape)
+            nhs = nhs[:, mask].copy()
+            print(mask.shape)
+            print(nhood_adj.shape)
+            nhood_adj = nhood_adj[:, mask]
+            nhood_adj = nhood_adj[mask, :].copy()
+            print(nhood_adj.shape)
+            # is_da = np.asarray(da_res.SpatialFDR <= SpatialFDR_threshold)
+            is_da = is_da[mask].copy()
+            # print(is_da.shape)
+
+        # da_res.loc[is_da, 'logFC'].values @ (da_res.loc[is_da, 'logFC']).T.values
+        # print(da_res.loc[is_da, 'logFC'])
+
+        if merge_discord is False:
+            # discord_sign = np.sign(da_res.loc[is_da, 'logFC'].values @ (da_res.loc[is_da, 'logFC'])) < 0
+            # Assuming da.res is a pandas DataFrame and is.da is a boolean array
+            discord_sign = np.sign(da_res.loc[is_da, 'logFC'].values @ da_res.loc[is_da, 'logFC'].values.T) < 0
+            # print(discord_sign.shape)
+            # nhood_adj[is_da, is_da][discord_sign] <- 0
+            # print(nhood_adj.shape)
+            nhood_adj[(is_da, is_da)][discord_sign] = 0
+
+        if overlap > 1:
+            nhood_adj[nhood_adj < overlap] = 0
+
+        if max_lfc_delta is not None:  
+            lfc_diff = np.array([da_res['logFC'].values - x for x in da_res['logFC'].values])
+            nhood_adj[np.abs(lfc_diff) > max_lfc_delta] = 0
+
+        # binarise
+        # nhood_adj = np.asarray((nhood_adj > 0) + 0)
+        nhood_adj = (nhood_adj > 0).astype(int)
+
+        g = sc._utils.get_igraph_from_adjacency(nhood_adj, directed = False)
+
+        weights = None
+        part = g.community_multilevel(weights=weights)
+
+        groups = np.array(part.membership)
+        groups = groups.astype(int).astype(str)
+
+        if subset_nhoods is not None:
+            mdata["milo"].var["nhood_groups"] = np.nan
+            mdata["milo"].var.loc[mask, "nhood_groups"] = groups
+            return None
+        mdata["milo"].var["nhood_groups"] = groups
+
     def _setup_rpy2(
         self,
     ):
@@ -656,8 +753,6 @@ class Milo:
         from rpy2.robjects import numpy2ri, pandas2ri
         from rpy2.robjects.packages import importr
 
-        numpy2ri.activate()
-        pandas2ri.activate()
         edgeR = self._try_import_bioc_library("edgeR")
         limma = self._try_import_bioc_library("limma")
         stats = importr("stats")
@@ -1055,3 +1150,169 @@ class Milo:
         if return_fig:
             return plt.gcf()
         return None
+    
+
+#### Conversion functions
+
+from scipy.sparse import csr_matrix
+from anndata2ri import scipy2ri
+
+from functools import singledispatch
+from scipy.sparse import csc_matrix
+
+import rpy2.rinterface_lib.callbacks
+# import anndata2ri
+import logging
+
+from rpy2.robjects import pandas2ri
+from rpy2.robjects import numpy2ri
+from rpy2.robjects import r
+import rpy2.robjects as ro
+from rpy2.robjects.packages import importr
+from rpy2.robjects import default_converter
+from rpy2.robjects.conversion import localconverter
+
+from rpy2.robjects.packages import STAP
+
+@singledispatch
+def _py_to_r(object):
+    with localconverter(default_converter):
+        r_obj = numpy2ri.py2rpy(object)
+
+    return r_obj
+
+@_py_to_r.register
+def _(object: np.ndarray):
+    with localconverter(default_converter + numpy2ri.converter):
+        r_obj = numpy2ri.py2rpy(object)
+        print(type(r_obj))
+
+    return r_obj
+
+@_py_to_r.register
+def _(object: pd.DataFrame):
+    with localconverter(default_converter + pandas2ri.converter):
+        r_obj = pandas2ri.py2rpy(object)
+
+    return r_obj
+
+@_py_to_r.register
+def _(object: pd.DataFrame):
+    with localconverter(default_converter + pandas2ri.converter):
+        r_obj = pandas2ri.py2rpy(object)
+
+    return r_obj
+
+@_py_to_r.register
+def _(object: csr_matrix):
+    with localconverter(scipy2ri.converter):
+        r_obj = scipy2ri.py2rpy(object)
+
+    return r_obj
+
+@_py_to_r.register
+def _(object: csc_matrix):
+    with localconverter(scipy2ri.converter):
+        r_obj = scipy2ri.py2rpy(object)
+
+    return r_obj
+
+def _r_to_py(object):
+
+    r_string = '''
+    .get_class <- function(object) class(object)
+    '''
+    r_pkg = STAP(r_string, "r_pkg")
+    
+    cur_class = r_pkg._get_class(object)[0]
+    
+    if cur_class == "dgCMatrix":
+        with localconverter(scipy2ri.converter):
+            r_obj = scipy2ri.rpy2py(object)
+
+        return r_obj
+
+    if cur_class == "dgRMatrix":
+        with localconverter(scipy2ri.converter):
+            r_obj = scipy2ri.rpy2py(object)
+
+        return r_obj
+
+    if cur_class == "matrix":
+        with localconverter(default_converter + numpy2ri.converter):
+            r_obj = numpy2ri.rpy2py(object)
+            
+        return r_obj 
+
+    if cur_class == "data.frame":
+        with localconverter(default_converter + pandas2ri.converter):
+            r_obj = pandas2ri.rpy2py(object)
+            
+        return r_obj 
+
+
+# rbase = importr("base")
+
+r_string = '''
+.get_class <- function(object) class(object)
+.get_colnames <- function(mat) colnames(mat)
+.get_rownames <- function(mat) rownames(mat)
+.get_rownames_dge <- function(dge) rownames(dge$counts)
+'''
+r_pkg = STAP(r_string, "r_pkg")
+
+# edger = importr("edgeR")
+
+def _ad_to_rmat(adata, layer = "X"):
+
+    mat = adata.X if layer == "X" else adata.layers[layer]
+    
+    obsnames = np.asarray(adata.obs_names)
+    obsnames = _py_to_r(obsnames)
+
+    varnames = np.asarray(adata.var_names)
+    varnames = _py_to_r(varnames)
+
+    r_string = '''
+    assign_colnames <- function(mat, names) {
+        colnames(mat) <- names
+        return(mat)
+    }
+    assign_rownames <- function(mat, names) {
+        rownames(mat) <- names
+        return(mat)
+    }
+    print_dimnames <- function(mat) {
+        print(head(rownames(mat)))
+    }
+
+    .get_class <- function(object) class(object)
+    .get_colnames <- function(mat) colnames(mat)
+    .get_rownames <- function(mat) rownames(mat)
+    .get_rownames_dge <- function(dge) rownames(dge$counts)
+    '''
+    r_pkg = STAP(r_string, "r_pkg")
+
+    rmat = _py_to_r(mat.T)
+    print(type(rmat))
+    print("after conversion")
+    print(type(rmat))
+    rmat = r_pkg.assign_colnames(rmat, obsnames)
+    print("after obsnames")
+    print(type(rmat))
+    rmat = r_pkg.assign_rownames(rmat, varnames)
+    print("after varnames")
+    print(type(rmat))
+    r_pkg.print_dimnames(rmat)
+    print(type(rmat))
+    
+
+    return rmat
+
+def _ad_to_dge(adata):
+    dge = edger.DGEList(
+        counts = _ad_to_rmat(adata),
+        samples = _py_to_r(adata.obs)
+    )
+
+    return dge
